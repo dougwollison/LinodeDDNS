@@ -4,13 +4,15 @@ DDNS Script using Linode's DNS API
 
 ##Usage
 
-Setup DD-WRT with like so
+Configure your router to ping http://[USERNAME]:[PASSWORD]@ddns.[DOMAIN]/[NAME], where:
 
-    DDNS Service: Custom
-    DYNDNS Server: ddns.[Your Sername Here]
-    User Name: [Your user name]
-    Password: [Your password]
-    Host Name: [Your subdomain]
-    URL: http://ddns.[Your domain name]/
+- USERNAME is your DDNS_USERNAME value,
+- PASSWORD is your DDNS_PASSWORD value,
+- DOMAIN is your domain name the script can be accessed at and where the subdomain will go
+- NAME is the name of the subdomain you wish to use for DDNS
 
-So, for example, to create/update home.mydomain.com to point to your router's public IP, it would post to ddns.mydomain.com/home.
+Example:
+
+http://root:root@ddns.mydomain.com/home
+
+Will add an A record for home to mydomain.com, pointing to the IP it's coming from.

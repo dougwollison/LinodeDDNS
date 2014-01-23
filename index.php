@@ -1,81 +1,113 @@
 <?php
-// Make sure the proper header is sent
-header('HTTP/1.1 200 OK');
+require( 'ddns-config.php' );
+require( 'Linode.php' );
 
-// Load necessary files
-require('Linode.php');
-require('linode-config.php');
-require('ddns-config.php');
+// Append to the request log
+function log_request ( $message ) {
+	static $start = true;
 
-// Test if Auth user/password is set and correct, exit if not
-if(!isset($_SERVER['PHP_AUTH_USER']) || $_SERVER['PHP_AUTH_USER'] !== DDNS_USERNAME) exit;
-if(!isset($_SERVER['PHP_AUTH_PW']) || $_SERVER['PHP_AUTH_PW'] !== DDNS_PASSWORD) exit;
+	if ( ! $start ) {
+		$message = "\t" . $message;
+	} else {
+		$start = false;
+	}
 
-// Get the desired subdomain from the request URI (/[domain])
-$ddnsname = preg_replace('/[^\w]+/', '-', trim(str_replace('?'.$_SERVER['QUERY_STRING'], '', $_SERVER['REQUEST_URI']), '/'));
+	$message .= "\n";
 
-// Get the hostname from the HTTP_HOST var, lopping off the ddns subdomain
-$hostname = preg_replace('/^ddns\./', '', $_SERVER['HTTP_HOST']);
+	error_log( $message, 3, __DIR__ . '/request_log' );
+}
 
-/*
- * Error reporting function, checks if ERRORARRAY is present and logs it if so
- */
-function check($response){
-	if($response->ERRORARRAY){
-		print_r($response->ERRORARRAY);
+// Set the response header and echo the message
+function done( $message, $code ) {
+	header( 'HTTP/1.1 '.$code );
+	die( $message );
+}
+
+// Call Linode::request with passed arguments, handle errors
+function request() {
+	$response = call_user_func_array( array( 'Linode', 'request' ), func_get_args() );
+	if ( $response->ERRORARRAY ) {
 		$code = $response->ERRORARRAY->ERRORCODE;
 		$message = $response->ERRORARRAY->ERRORMESSAGE;
-		error_log("Linode Error #$code: $message");
-		exit;
+		log_request( "Linode Error #$code: $message" );
+		done( 'error', '500 Internal Server Error' );
 	}
+	return $response;
 }
 
-// Setup Linode with the API key
-Linode::init(LINODE_KEY);
+// Get the client IP
+$ip = $_SERVER['REMOTE_ADDR'];
 
-// Get the list of domains
-$domains = Linode::request('domain.list');
+// Get the Host
+$host = preg_replace( '/^ddns\./', '', $_SERVER['HTTP_HOST'] );
 
-// Check for errors
-check($domains);
+// Get the URI
+$uri = trim( str_replace( '?'.$_SERVER['QUERY_STRING'], '', $_SERVER['REQUEST_URI'] ), '/' );
 
-// Loop through the domains
-foreach($domains->DATA as $domain){
-	// See if the domain matches the $hostname
-	if($domain->DOMAIN == $hostname){
-		// Get the list of records for the domain
-		$resources = Linode::request('domain.resource.list', array('DomainID' => $domain->DOMAINID));
-		
-		// Check for errors
-		check($resources);
-		
-		// Loop through the records
-		foreach($resources as $resource){
-			// See if it matches the disired $ddnsname
-			if($resource->NAME == $ddnsname){
-				// Make the update request
-				$update = Linode::request('domain.resource.update', array(
-					'DomainID' => $domain->DOMAINID,
+// Begin the log for this request
+log_request( sprintf("[%s from %s]: %s/%s", date( 'c' ), $ip, $host, $uri ) );
+
+// Get the subdomain
+$name = preg_replace( '/[^\w]+/', '-', $uri );
+
+// Abort if no URI
+if ( ! $uri ) {
+	log_request( 'No URI specified; aborting.' );
+	done( 'invalid', '404 Bad Request' );
+}
+
+// Check authentication
+if( !isset( $_SERVER['PHP_AUTH_USER'] ) ||
+	!isset( $_SERVER['PHP_AUTH_PW'] ) |
+	$_SERVER['PHP_AUTH_USER'] !== DDNS_USERNAME ||
+	$_SERVER['PHP_AUTH_PW'] !== DDNS_PASSWORD ) {
+	log_request( 'Invalid/missing credentials; aborting.' );
+	done( 'denied', '403 Forbidden' );
+}
+
+// Setup Linode
+Linode::init( LINODE_KEY );
+
+// Fetch the Domains
+log_request( 'Fetching domains...' );
+$domains = request( 'domain.list' );
+
+// Loop through domains...
+foreach ( $domains->DATA as $domain ) {
+	if ( $domain->DOMAIN == $host ) {
+		// Get resources for matched domain
+		log_request( "Fetching resources for $host..." );
+		$resources = request( 'domain.resource.list', array(
+			'DomainID' => $domain->DOMAINID
+		));
+
+		// Loop through resources...
+		foreach ( $resources->DATA as $resource ) {
+			if ( $resource->NAME == $name ) {
+				// Update the matched domain
+				log_request( "Record for $name already exists; updating..." );
+				$update = request( 'domain.resource.update', array(
+					'DomainID'   => $domain->DOMAINID,
 					'ResourceID' => $resource->RESOURCEID,
-					'Target' => $_SERVER['REMOTE_ADDR']
+					'Target'     => $ip
 				));
-				
-				// Check for errors
-				check($update);
-				exit;
+				done( 'success', '200 OK' );
 			}
 		}
-		
-		// Subdomain doens't exist, create it
-		$create = Linode::request('domain.resource.create', array(
+
+		// Add the new resource...
+		log_request( "No record for $name found; creating..." );
+		$create = request( 'domain.resource.create', array(
 			'DomainID' => $domain->DOMAINID,
-			'Type' => 'A',
-			'Name' => $ddnsname,
-			'Target' => $_SERVER['REMOTE_ADDR']
+			'Type'     => 'A',
+			'Name'     => $name,
+			'Target'   => $ip,
+			'TTL_sec'  => DDNS_TTL
 		));
-		
-		// Check for errors
-		check($create);
-		exit;
+		done( 'success', '200 OK' );
 	}
 }
+
+// Somehow, there's no record for $host
+log_request( "Error: no record for $host..." );
+done( 'missing', '404 Not Found' );
